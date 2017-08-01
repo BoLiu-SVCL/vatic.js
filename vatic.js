@@ -158,113 +158,6 @@ function extractFramesFromZip(config, file) {
   });
 }
 
-/**
- * Tracks point between two consecutive frames using optical flow.
- */
-class OpticalFlow {
-  constructor() {
-    this.isInitialized = false;
-    this.previousPyramid = new jsfeat.pyramid_t(3);
-    this.currentPyramid = new jsfeat.pyramid_t(3);
-  }
-
-  init(imageData) {
-    this.previousPyramid.allocate(imageData.width, imageData.height, jsfeat.U8_t | jsfeat.C1_t);
-    this.currentPyramid.allocate(imageData.width, imageData.height, jsfeat.U8_t | jsfeat.C1_t);
-    jsfeat.imgproc.grayscale(imageData.data, imageData.width, imageData.height, this.previousPyramid.data[0]);
-    this.previousPyramid.build(this.previousPyramid.data[0]);
-    this.isInitialized = true;
-  }
-
-  reset() {
-    this.isInitialized = false;
-  }
-
-  track(imageData, bboxes) {
-    if (!this.isInitialized) {
-      throw 'not initialized';
-    }
-
-    jsfeat.imgproc.grayscale(imageData.data, imageData.width, imageData.height, this.currentPyramid.data[0]);
-    this.currentPyramid.build(this.currentPyramid.data[0]);
-
-    // TODO: Move all configuration to config
-    let bboxBorderWidth = 1;
-
-    let pointsPerDimension = 11;
-    let pointsPerObject = pointsPerDimension * pointsPerDimension;
-    let pointsCountUpperBound = bboxes.length * pointsPerObject;
-    let pointsStatus = new Uint8Array(pointsCountUpperBound);
-    let previousPoints = new Float32Array(pointsCountUpperBound * 2);
-    let currentPoints = new Float32Array(pointsCountUpperBound * 2);
-
-    let pointsCount = 0;
-    for (let i = 0, n = 0; i < bboxes.length; i++) {
-      let bbox = bboxes[i];
-      if (bbox != null) {
-        for (let x = 0; x < pointsPerDimension; x++) {
-          for (let y = 0; y < pointsPerDimension; y++) {
-            previousPoints[pointsCount*2] = bbox.x + x * (bbox.width / (pointsPerDimension - 1));
-            previousPoints[pointsCount*2 + 1] = bbox.y + y * (bbox.height / (pointsPerDimension - 1));
-            pointsCount++;
-          }
-        }
-      }
-    }
-    if (pointsCount == 0) {
-      throw 'no points to track';
-    }
-
-    jsfeat.optical_flow_lk.track(this.previousPyramid, this.currentPyramid, previousPoints, currentPoints, pointsCount, 30, 30, pointsStatus, 0.01, 0.001);
-
-    let newBboxes = [];
-    let p = 0;
-    for (let i = 0; i < bboxes.length; i++) {
-      let bbox = bboxes[i];
-      let newBbox = null;
-
-      if (bbox != null) {
-        let before = [];
-        let after = [];
-
-        for (let j = 0; j < pointsPerObject; j++, p++) {
-          if (pointsStatus[p] == 1) {
-            let x = p * 2;
-            let y = x + 1;
-
-            before.push([previousPoints[x], previousPoints[y]]);
-            after.push([currentPoints[x], currentPoints[y]]);
-          }
-        }
-
-        if (before.length > 0) {
-          let diff = nudged.estimate('T', before, after);
-          let translation = diff.getTranslation();
-
-          let minX = Math.max(Math.round(bbox.x + translation[0]), 0);
-          let minY = Math.max(Math.round(bbox.y + translation[1]), 0);
-          let maxX = Math.min(Math.round(bbox.x + bbox.width + translation[0]), imageData.width - 2*bboxBorderWidth);
-          let maxY = Math.min(Math.round(bbox.y + bbox.height + translation[1]), imageData.height - 2*bboxBorderWidth);
-          let newWidth = maxX - minX;
-          let newHeight = maxY - minY;
-
-          if (newWidth > 0 && newHeight > 0) {
-            newBbox = new BoundingBox(minX, minY, newWidth, newHeight);
-          }
-        }
-      }
-
-      newBboxes.push(newBbox);
-    }
-
-    // Swap current and previous pyramids
-    let oldPyramid = this.previousPyramid;
-    this.previousPyramid = this.currentPyramid;
-    this.currentPyramid = oldPyramid; // Buffer re-use
-
-    return newBboxes;
-  }
-};
 
 /**
  * Represents the coordinates of a bounding box
@@ -305,53 +198,120 @@ class AnnotatedObject {
     for (let i = 0; i < this.frames.length; i++) {
       if (this.frames[i].frameNumber == frame.frameNumber) {
         this.frames[i] = frame;
-        this.removeFramesToBeRecomputedFrom(i + 1);
+				this.removeFramesToBeRecomputed(i);
         return;
-      } else if (this.frames[i].frameNumber > frame.frameNumber) {
+			} else if (this.frames[i].frameNumber > frame.frameNumber) {
         this.frames.splice(i, 0, frame);
-        this.removeFramesToBeRecomputedFrom(i + 1);
-        this.injectInvisibleFrameAtOrigin();
+				this.removeFramesToBeRecomputed(i);
         return;
       }
     }
 
     this.frames.push(frame);
-    this.injectInvisibleFrameAtOrigin();
+		if (frame.isGroundTruth == true) {
+			this.removeFramesToBeRecomputed(this.frames.length - 1);
+		}
   }
 
   get(frameNumber) {
-    for (let i = 0; i < this.frames.length; i++) {
-      let currentFrame = this.frames[i];
-      if (currentFrame.frameNumber > frameNumber) {
-        break;
-      }
-
-      if (currentFrame.frameNumber == frameNumber) {
-        return currentFrame;
-      }
-    }
-
-    return null;
+		return new Promise((resolve, _) => {
+			this.interpolate(frameNumber).then((currentFrame) => {
+				resolve(currentFrame);
+			});
+		});
   }
-
-  removeFramesToBeRecomputedFrom(frameNumber) {
-    let count = 0;
-    for (let i = frameNumber; i < this.frames.length; i++) {
-      if (this.frames[i].isGroundTruth) {
-        break;
-      }
-      count++;
-    }
-    if (count > 0) {
-      this.frames.splice(frameNumber, count);
-    }
-  }
-
-  injectInvisibleFrameAtOrigin() {
-    if (this.frames.length == 0 || this.frames[0].frameNumber > 0) {
-      this.frames.splice(0, 0, new AnnotatedFrame(0, null, false));
-    }
-  }
+	
+	interpolate(frameNumber) {
+		return new Promise((resolve, _) => {
+			let preGT = -1;
+			let nextGT = -1;
+			let current = -1;
+			for (let i = 0; i < this.frames.length; i++) {
+				if (this.frames[i].frameNumber == frameNumber) {
+					resolve(this.frames[i]);
+				}
+				if ( (current < 0) && (this.frames[i].frameNumber > frameNumber) ) {
+					current = i;
+				}
+				if (this.frames[i].isGroundTruth) {
+					if (this.frames[i].frameNumber < frameNumber) {
+						preGT = i;
+					} else {
+						nextGT = i;
+						break;
+					}
+				}
+			}
+			
+			if (current < 0) {
+				let currentBbox = this.frames[preGT].bbox;
+				if (currentBbox == null) {
+					this.frames.push(new AnnotatedFrame(frameNumber, null, false));
+				} else {
+					let bbox = new BoundingBox(currentBbox.x, currentBbox.y, currentBbox.width, currentBbox.height);
+					this.frames.push(new AnnotatedFrame(frameNumber, bbox, false));
+				}
+				resolve(this.frames[this.frames.length - 1]);
+			} else {
+				if (preGT < 0) {
+					this.frames.splice(current, 0, new AnnotatedFrame(frameNumber, null, false));
+				} else if (nextGT < 0) {
+					let currentBbox = this.frames[preGT].bbox;
+					if (currentBbox == null) {
+						this.frames.splice(current, 0, new AnnotatedFrame(frameNumber, null, false));
+					} else {
+						let bbox = new BoundingBox(currentBbox.x, currentBbox.y, currentBbox.width, currentBbox.height);
+						this.frames.splice(current, 0, new AnnotatedFrame(frameNumber, bbox, false));
+					}
+				} else {
+					let interval = this.frames[nextGT].frameNumber - this.frames[preGT].frameNumber;
+					let stride = frameNumber - this.frames[preGT].frameNumber;
+					let startBbox = this.frames[preGT].bbox;
+					let endBbox = this.frames[nextGT].bbox;
+					if ( (startBbox == null) && (endBbox == null) ) {
+						this.frames.splice(current, 0, new AnnotatedFrame(frameNumber, null, false));
+					} else if (endBbox == null) {
+						let bbox = new BoundingBox(startBbox.x, startBbox.y, startBbox.width, startBbox.height);
+						this.frames.splice(current, 0, new AnnotatedFrame(frameNumber, bbox, false));
+					} else if (startBbox == null) {
+						let bbox = new BoundingBox(endBbox.x, endBbox.y, endBbox.width, endBbox.height);
+						this.frames.splice(current, 0, new AnnotatedFrame(frameNumber, bbox, false));
+					} else {
+						let newX = startBbox.x + Math.round(stride * (endBbox.x - startBbox.x) / interval);
+						let newY = startBbox.y + Math.round(stride * (endBbox.y - startBbox.y) / interval);
+						let newWidth = startBbox.width + Math.round(stride * (endBbox.width - startBbox.width) / interval);
+						let newHeight = startBbox.height + Math.round(stride * (endBbox.height - startBbox.height) / interval);
+						let bbox = new BoundingBox(newX, newY, newWidth, newHeight);
+						this.frames.splice(current, 0, new AnnotatedFrame(frameNumber, bbox, false));
+					}
+				}
+				resolve(this.frames[current]);
+			}
+		});
+	}
+	removeFramesToBeRecomputed(frameNumber) {
+		let count = 0;
+		for (let i = frameNumber + 1; i < this.frames.length; i++) {
+			if (this.frames[i].isGroundTruth) {
+				break;
+			}
+			count++;
+		}
+		if (count > 0) {
+			this.frames.splice(frameNumber, count);
+		}
+		
+		count = 0;
+		for (let i = frameNumber - 1; i >= 0; i--) {
+			if (this.frames[i].isGroundTruth) {
+				break;
+			}
+			count++;
+		}
+		if (count > 0) {
+			this.frames.splice(frameNumber - count, count);
+		}
+	}
 }
 
 /**
@@ -361,7 +321,6 @@ class AnnotatedObjectsTracker {
   constructor(framesManager) {
     this.framesManager = framesManager;
     this.annotatedObjects = [];
-    this.opticalFlow = new OpticalFlow();
     this.lastFrame = -1;
     this.ctx = document.createElement('canvas').getContext('2d');
 
@@ -373,114 +332,44 @@ class AnnotatedObjectsTracker {
 
   getFrameWithObjects(frameNumber) {
     return new Promise((resolve, _) => {
-      let i = this.startFrame(frameNumber);
-
-      let trackNextFrame = () => {
-        this.track(i).then((frameWithObjects) => {
-          if (i == frameNumber) {
-            resolve(frameWithObjects);
-          } else {
-            i++;
-            trackNextFrame();
-          }
-        });
-      };
-
-      trackNextFrame();
+			this.framesManager.frames.getFrame(frameNumber).then((blob) => {
+				blobToImage(blob).then((img) => {
+					let result = [];
+					let i = 0;
+					let getFrames = (result) => {
+						if (i >= this.annotatedObjects.length) {
+							resolve({img: img, objects: result});
+						} else {
+							let annotatedObject = this.annotatedObjects[i];
+							annotatedObject.get(frameNumber).then((annotatedFrame) => {
+								result.push({annotatedObject: annotatedObject, annotatedFrame: annotatedFrame});
+								i++
+								getFrames(result);
+							});
+						}
+					};
+					
+					getFrames(result);
+				});
+			});
+			
     });
   }
-
-  startFrame(frameNumber) {
-    for (; frameNumber >= 0; frameNumber--) {
-      let allObjectsHaveData = true;
-
-      for (let i = 0; i < this.annotatedObjects.length; i++) {
-        let annotatedObject = this.annotatedObjects[i];
-        if (annotatedObject.get(frameNumber) == null) {
-          allObjectsHaveData = false;
-          break;
-        }
-      }
-
-      if (allObjectsHaveData) {
-        return frameNumber;
-      }
-    }
-
-    throw 'corrupted object annotations';
-  }
-
-  track(frameNumber) {
-    return new Promise((resolve, _) => {
-      this.framesManager.frames.getFrame(frameNumber).then((blob) => {
-        blobToImage(blob).then((img) => {
-          let result = [];
-          let toCompute = [];
-          for (let i = 0; i < this.annotatedObjects.length; i++) {
-            let annotatedObject = this.annotatedObjects[i];
-            let annotatedFrame = annotatedObject.get(frameNumber);
-            if (annotatedFrame == null) {
-              annotatedFrame = annotatedObject.get(frameNumber - 1);
-              if (annotatedFrame == null) {
-                throw 'tracking must be done sequentially';
-              }
-              toCompute.push({annotatedObject: annotatedObject, bbox: annotatedFrame.bbox});
-            } else {
-              result.push({annotatedObject: annotatedObject, annotatedFrame: annotatedFrame});
-            }
-          }
-
-          let bboxes = toCompute.map(c => c.bbox);
-          let hasAnyBbox = bboxes.some(bbox => bbox != null);
-          let optionalOpticalFlowInit;
-          if (hasAnyBbox) {
-            optionalOpticalFlowInit = this.initOpticalFlow(frameNumber - 1);
-          } else {
-            optionalOpticalFlowInit = new Promise((r, _) => { r(); });
-          }
-
-          optionalOpticalFlowInit.then(() => {
-            let newBboxes;
-            if (hasAnyBbox) {
-              let imageData = this.imageData(img);
-              newBboxes = this.opticalFlow.track(imageData, bboxes);
-              this.lastFrame = frameNumber;
-            } else {
-              newBboxes = bboxes;
-            }
-
-            for (let i = 0; i < toCompute.length; i++) {
-              let annotatedObject = toCompute[i].annotatedObject;
-              let annotatedFrame = new AnnotatedFrame(frameNumber, newBboxes[i], false);
-              annotatedObject.add(annotatedFrame);
-              result.push({annotatedObject: annotatedObject, annotatedFrame: annotatedFrame});
-            }
-
-            resolve({img: img, objects: result});
-          });
-        });
-      });
-    });
-  }
-
-  initOpticalFlow(frameNumber) {
-    return new Promise((resolve, _) => {
-      if (this.lastFrame != -1 && this.lastFrame == frameNumber) {
-        resolve();
-      } else {
-        this.opticalFlow.reset();
-        this.framesManager.frames.getFrame(frameNumber).then((blob) => {
-          blobToImage(blob).then((img) => {
-            let imageData = this.imageData(img);
-            this.opticalFlow.init(imageData);
-            this.lastFrame = frameNumber;
-            resolve();
-          });
-        });
-      }
-    });
-  }
-
+	
+	getResult(frameNumber) {
+		return new Promise((resolve, _) => {
+			let result = [];
+			for (let i = 0; i < this.annotatedObjects.length; i++) {
+				let annotatedOannotatedObject = annotatedObjects[i];
+				annotatedObject.get(frameNumber).then((annotatedFrame) => {
+					if (annotatedFrame != null) {
+						result.push({annotatedObject: annotatedObject, annotatedFrame: annotatedFrame});
+					}
+				});
+			}
+			resolve(result);
+		});
+	}
   imageData(img) {
     let canvas = this.ctx.canvas;
     canvas.width = img.width;
