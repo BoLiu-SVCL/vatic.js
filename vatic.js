@@ -18,6 +18,16 @@ class FramesManager {
 
 function blobToImage(blob) {
   return new Promise((result, _) => {
+      let img = new Image();
+			img.onload = function() {
+      result(img);
+    };
+    img.src = blob;
+   });
+}
+/*
+function blobToImage(blob) {
+  return new Promise((result, _) => {
     let img = new Image();
     img.onload = function() {
       result(img);
@@ -26,6 +36,7 @@ function blobToImage(blob) {
     img.src = URL.createObjectURL(blob);
   });
 }
+*/
 
 /**
  * Extracts the frame sequence of a video file.

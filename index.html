@@ -145,6 +145,8 @@
         <p style="text-indent: 2em;">5. Play the video and use left and right arrows to navigate frame by frame, change the location of circle to make sure that the center of it will always match the head of the person.</p>
 
         <p class="output" id="frameProgress"></p>
+				
+				
         <div id="doodle">
           <canvas id="canvas"></canvas>
         </div>
@@ -162,16 +164,14 @@
         <p><input type="button" id="generateXml" value="Submit" disabled="true" /></p>
 
 
-    <script type="text/javascript" src="dist/compatibility.js"></script>
-    <script type="text/javascript" src="dist/jszip.js"></script>
-    <script type="text/javascript" src="dist/StreamSaver.js"></script>
-    <script type="text/javascript" src="dist/polyfill.js"></script>
-    <script type="text/javascript" src="dist/jsfeat.js"></script>
-    <script type="text/javascript" src="dist/nudged.js"></script>
-    <script type="text/javascript" src="dist/pouchdb.min.js"></script>
-    <script type="text/javascript" src="dist/jquery-1.12.4.js"></script>
-    <script type="text/javascript" src="dist/jquery-ui.js"></script>
-		<script type="text/javascript" src="dist/jszip-utils.js"></script>
+    
+    <script type="text/javascript" src="https://rawgit.com/BoLiu-SVCL/vatic.js/master/dist/jszip.js"></script>
+    <script type="text/javascript" src="https://rawgit.com/BoLiu-SVCL/vatic.js/master/dist/jsfeat.js"></script>
+    <script type="text/javascript" src="https://rawgit.com/BoLiu-SVCL/vatic.js/master/dist/nudged.js"></script>
+    <script type="text/javascript" src="https://rawgit.com/BoLiu-SVCL/vatic.js/master/dist/pouchdb.min.js"></script>
+    <script type="text/javascript" src="https://rawgit.com/BoLiu-SVCL/vatic.js/master/dist/jquery-1.12.4.js"></script>
+    <script type="text/javascript" src="https://rawgit.com/BoLiu-SVCL/vatic.js/master/dist/jquery-ui.js"></script>
+		<script type="text/javascript" src="https://rawgit.com/BoLiu-SVCL/vatic.js/master/dist/jszip-utils.js"></script>
     <script type="text/javascript" src="vatic.js"></script>
     <script type="text/javascript">
       "use strict";
@@ -399,9 +399,37 @@
       generateXmlButton.addEventListener('click', generateXml, false);
 
 			function startClicked() {
+			let url = 'test';
+			let totalFrames = 316;
+			extractFramesFromFile(url, totalFrames)
+				.then((frames) => {
+          //extractionProgressElement.innerHTML = 'Extraction completed. ' + frames.totalFrames() + ' frames captured.';
+          if (frames.totalFrames() > 0) {
+            frames.getFrame(0).then((blob) => {
+              blobToImage(blob).then((img) => {
+                initializeCanvasDimensions(img);
+                ctx.drawImage(img, 0, 0);
+                //videoDimensionsElement.innerHTML = 'Video dimensions determined: ' + img.width + 'x' + img.height;
+
+                framesManager.set(frames);
+                slider.init(
+                  0,
+                  framesManager.frames.totalFrames() - 1,
+                  (frameNumber) => player.seek(frameNumber)
+                );
+                player.ready();
+
+                playButton.disabled = false;
+                generateXmlButton.disabled = false;
+              });
+            });
+          }
+          startAnnotationButton.disabled = true;
+        });
+			/*
 			let promise;
 				new JSZip.external.Promise(function (resolve, reject) {
-					JSZipUtils.getBinaryContent('data/test.zip', function(err, data) {
+					JSZipUtils.getBinaryContent('test.zip', function(err, data) {
 						if (err) {
 							reject(err);
 						} else {
@@ -435,6 +463,35 @@
           }
           startAnnotationButton.disabled = true;
         });
+				*/
+			}
+			
+			function getImage(url){
+				return new Promise(function(resolve, reject){
+					var img = new Image()
+					img.onload = function(){
+            resolve(url);
+					}
+					img.onerror = function(){
+            reject(url);
+					}
+					img.src = url;
+				});
+			}
+			
+			function extractFramesFromFile(url, totalFrames) {
+				return new Promise((resolve, _) => {
+					
+					resolve({
+						totalFrames: () => { return totalFrames; },
+						getFrame: (frameNumber) => {
+							return new Promise((resolve, _) => {
+								let src = url + '/' + frameNumber + '.jpg';
+								resolve(src);
+							});
+						}
+					});
+				});
 			}
 			
       function playClicked() {
